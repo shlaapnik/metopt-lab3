@@ -1,65 +1,99 @@
 import os
 import re
-import pandas as pd
+import polars as pl
 import matplotlib.pyplot as plt
-from collections import defaultdict
 
-OUT_DIR = "../out"
-SAVE_DIR = "../visualization/plots"
-os.makedirs(SAVE_DIR, exist_ok=True)
+OUT = "../out"
+DATA = ".."
+SAVE = "plots"
+os.makedirs(SAVE, exist_ok=True)
 
-COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+COLORS = {"SGD": "#1f77b4", "Momentum": "#ff7f0e", "Adam": "#2ca02c"}
 
 
-def group_files():
-    groups = defaultdict(dict)
-    pattern = re.compile(r"^(.+)__(.+)\.csv$")
-    for fname in os.listdir(OUT_DIR):
-        m = pattern.match(fname)
+def opt_color(name):
+    for k, c in COLORS.items():
+        if name.startswith(k):
+            return c
+    return "#555555"
+
+
+def history():
+    g = {}
+    for f in os.listdir(OUT):
+        m = re.match(r"(.+)__(.+)\.csv", f)
         if m:
-            ds, opt = m.group(1), m.group(2)
-            groups[ds][opt] = os.path.join(OUT_DIR, fname)
-    return groups
+            g.setdefault(m.group(1), {})[m.group(2)] = pl.read_csv(os.path.join(OUT, f))
+    return g
 
 
-def plot_dataset(ds_name, methods, save_dir):
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle(f"Обучение нейронной сети — {ds_name}", fontsize=14, fontweight="bold")
+def save(fig, name):
+    fig.tight_layout()
+    p = os.path.join(SAVE, name + ".png")
+    fig.savefig(p, dpi=150)
+    plt.close(fig)
+    print(p)
 
-    ax_loss, ax_f1 = axes
 
-    for color, (opt_name, path) in zip(COLORS, methods.items()):
-        df = pd.read_csv(path)
-        label = opt_name.replace("_", " ")
-        ax_loss.plot(df["epoch"], df["train_loss"], color=color, label=label, linewidth=1.8)
-        ax_f1.plot(df["epoch"], df["test_f1"], color=color, label=label, linewidth=1.8)
+def plot_curves(ds, runs):
+    fig, ax = plt.subplots(1, 3, figsize=(16, 4.5))
+    for opt, df in sorted(runs.items()):
+        c = opt_color(opt)
+        ep = df["epoch"].to_numpy()
+        ax[0].plot(ep, df["train_loss"].to_numpy(), color=c, label=opt)
+        ax[0].plot(ep, df["test_loss"].to_numpy(), color=c, ls="--", alpha=0.6)
+        ax[1].plot(ep, df["test_f1"].to_numpy(), color=c, label=opt)
+        ax[2].plot(ep, df["test_acc"].to_numpy(), color=c, label=opt)
 
-    ax_loss.set_title("Train Loss")
-    ax_loss.set_xlabel("Эпоха")
-    ax_loss.set_ylabel("BCE Loss")
-    ax_loss.set_yscale("log")
-    ax_loss.legend()
-    ax_loss.grid(True, which="both", ls="--", alpha=0.4)
+    ax[0].set(title="loss (— train, -- test)", xlabel="epoch", ylabel="BCE")
+    ax[0].set_yscale("log")
+    ax[1].set(title="test F1", xlabel="epoch", ylim=(0, 1.05))
+    ax[2].set(title="test accuracy", xlabel="epoch", ylim=(0, 1.05))
+    for a in ax:
+        a.grid(True, ls="--", alpha=0.3)
+        a.legend()
+    fig.suptitle(ds)
+    save(fig, ds + "_curves")
 
-    ax_f1.set_title("Test F1-score")
-    ax_f1.set_xlabel("Эпоха")
-    ax_f1.set_ylabel("F1")
-    ax_f1.set_ylim(0, 1.05)
-    ax_f1.legend()
-    ax_f1.grid(True, ls="--", alpha=0.4)
 
-    plt.tight_layout()
-    path = os.path.join(save_dir, f"{ds_name}.png")
-    plt.savefig(path, dpi=150)
-    print(f"Сохранён: {path}")
-    plt.close()
+def plot_corr(ds, df):
+    cols = df.columns
+    corr = df.corr().to_numpy()
+    n = len(cols)
+    fig, ax = plt.subplots(figsize=(0.9 * n + 2, 0.9 * n + 1.5))
+    im = ax.imshow(corr, cmap="coolwarm", vmin=-1, vmax=1)
+    ax.set_xticks(range(n), cols, rotation=45, ha="right")
+    ax.set_yticks(range(n), cols)
+    for i in range(n):
+        for j in range(n):
+            v = corr[i, j]
+            ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                    color="white" if abs(v) > 0.5 else "black")
+    fig.colorbar(im, ax=ax, fraction=0.046)
+    ax.set_title(ds + ": correlation")
+    save(fig, ds + "_corr")
+
+
+def plot_scatter(ds, df):
+    if df.width != 3:  # 2 признака + target
+        return
+    x, y, t = df.columns
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for cls, color in [(0, "#1f77b4"), (1, "#d62728")]:
+        s = df.filter(pl.col(t).cast(pl.Int64) == cls)
+        ax.scatter(s[x].to_numpy(), s[y].to_numpy(), s=12, color=color, alpha=0.7, label=f"class {cls}")
+    ax.set(title=ds + ": classes", xlabel=x, ylabel=y)
+    ax.grid(True, ls="--", alpha=0.3)
+    ax.legend()
+    save(fig, ds + "_scatter")
 
 
 if __name__ == "__main__":
-    groups = group_files()
-    if not groups:
-        print(f"CSV не найдены в {OUT_DIR}. Сначала запустите go run ./cmd/metopt-lab3/")
-    else:
-        for ds_name, methods in sorted(groups.items()):
-            plot_dataset(ds_name, methods, SAVE_DIR)
-        print("Готово.")
+    for ds, runs in sorted(history().items()):
+        plot_curves(ds, runs)
+
+    for f in sorted(os.listdir(DATA)):
+        if re.match(r"dataset.*\.csv", f):
+            df = pl.read_csv(os.path.join(DATA, f))
+            plot_corr(f[:-4], df)
+            plot_scatter(f[:-4], df)

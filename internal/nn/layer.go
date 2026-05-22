@@ -7,19 +7,16 @@ import (
 	"github.com/shlaapnik/metopt-lab3/internal/optimizer"
 )
 
-// Layer is a fully-connected dense layer with activation.
 type Layer struct {
-	W      [][]float64 // [outDim][inDim]
-	b      []float64   // [outDim]
+	W      [][]float64
+	b      []float64
 	Act    Activation
-	Lambda float64 // L2 regularization coefficient
+	Lambda float64
 
-	// cached during forward pass
 	input  []float64
-	Z      []float64 // pre-activation (exported for backward access from Network)
+	Z      []float64
 	output []float64
 
-	// accumulated gradients, reset after each optimizer step
 	dW [][]float64
 	db []float64
 
@@ -27,6 +24,7 @@ type Layer struct {
 	optB optimizer.Optimizer
 }
 
+// NewLayer creates a dense layer with He-initialized weights and independent optimizer state.
 func NewLayer(inDim, outDim int, act Activation, lambda float64, optProto optimizer.Optimizer) *Layer {
 	l := &Layer{
 		W:      make([][]float64, outDim),
@@ -38,7 +36,6 @@ func NewLayer(inDim, outDim int, act Activation, lambda float64, optProto optimi
 		optW:   optProto.Clone(),
 		optB:   optProto.Clone(),
 	}
-	// He initialization (suitable for ReLU; acceptable for Sigmoid too)
 	scale := math.Sqrt(2.0 / float64(inDim))
 	for i := range l.W {
 		l.W[i] = make([]float64, inDim)
@@ -67,8 +64,7 @@ func (l *Layer) Forward(x []float64) []float64 {
 	return l.output
 }
 
-// BackwardDelta receives dL/dz for this layer, accumulates gradients,
-// and returns dL/dx to propagate to the previous layer.
+// BackwardDelta takes dL/dz, accumulates gradients, returns dL/dx.
 func (l *Layer) BackwardDelta(delta []float64) []float64 {
 	for j, d := range delta {
 		for k, x := range l.input {
@@ -85,8 +81,7 @@ func (l *Layer) BackwardDelta(delta []float64) []float64 {
 	return dx
 }
 
-// ApplyGradients averages accumulated gradients over batchSize,
-// adds L2 penalty, then calls the optimizer.
+// ApplyGradients averages over the batch, adds L2, then steps the optimizer.
 func (l *Layer) ApplyGradients(batchSize int) {
 	n := float64(batchSize)
 
@@ -109,6 +104,21 @@ func (l *Layer) ApplyGradients(batchSize int) {
 		}
 		l.db[i] = 0
 	}
+}
+
+func (l *Layer) SnapshotParams() ([][]float64, []float64) {
+	w := make([][]float64, len(l.W))
+	for i, row := range l.W {
+		w[i] = append([]float64(nil), row...)
+	}
+	return w, append([]float64(nil), l.b...)
+}
+
+func (l *Layer) RestoreParams(w [][]float64, b []float64) {
+	for i := range l.W {
+		copy(l.W[i], w[i])
+	}
+	copy(l.b, b)
 }
 
 func flattenW(W [][]float64) []float64 {

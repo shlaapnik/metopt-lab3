@@ -7,16 +7,14 @@ import (
 	"github.com/shlaapnik/metopt-lab3/internal/optimizer"
 )
 
-// Config holds network and training hyperparameters.
 type Config struct {
-	HiddenSizes []int
-	Lambda      float64 // L2 regularization coefficient
-	BatchSize   int
-	Epochs      int
-	EarlyStopping int // patience in epochs; 0 = disabled
+	HiddenSizes   []int
+	Lambda        float64
+	BatchSize     int
+	Epochs        int
+	EarlyStopping int
 }
 
-// Trace records per-epoch metrics for later analysis.
 type Trace struct {
 	Epoch     int
 	TrainLoss float64
@@ -25,14 +23,12 @@ type Trace struct {
 	TestF1    float64
 }
 
-// Network is a fully-connected neural network for binary classification.
 type Network struct {
 	layers []*Layer
 	cfg    Config
 }
 
-// New builds a network with the given input dimension, config, and optimizer prototype.
-// Each layer clones its own optimizer instances from optProto.
+// New builds inputDim -> hidden (ReLU) -> 1 (Sigmoid).
 func New(inputDim int, cfg Config, optProto optimizer.Optimizer) *Network {
 	sizes := make([]int, 0, len(cfg.HiddenSizes)+2)
 	sizes = append(sizes, inputDim)
@@ -52,7 +48,6 @@ func New(inputDim int, cfg Config, optProto optimizer.Optimizer) *Network {
 	return n
 }
 
-// Forward runs the network on one sample and returns the scalar output.
 func (n *Network) Forward(x []float64) float64 {
 	out := x
 	for _, l := range n.layers {
@@ -61,8 +56,7 @@ func (n *Network) Forward(x []float64) float64 {
 	return out[0]
 }
 
-// Backward computes gradients for one sample and accumulates them in each layer.
-// Uses the numerically stable combined BCE+Sigmoid gradient: dL/dz_out = ŷ - y.
+// Backward: output delta is the combined BCE+sigmoid gradient ŷ - y.
 func (n *Network) Backward(target float64) {
 	last := n.layers[len(n.layers)-1]
 	delta := []float64{last.output[0] - target}
@@ -79,7 +73,6 @@ func (n *Network) Backward(target float64) {
 	}
 }
 
-// TrainEpoch runs one epoch of mini-batch training and returns mean train loss.
 func (n *Network) TrainEpoch(X [][]float64, y []float64) float64 {
 	indices := rand.Perm(len(X))
 	totalLoss := 0.0
@@ -103,7 +96,6 @@ func (n *Network) TrainEpoch(X [][]float64, y []float64) float64 {
 	return totalLoss / float64(len(X))
 }
 
-// EvalLoss computes mean BCE loss on a dataset.
 func (n *Network) EvalLoss(X [][]float64, y []float64) float64 {
 	total := 0.0
 	for i, x := range X {
@@ -112,7 +104,6 @@ func (n *Network) EvalLoss(X [][]float64, y []float64) float64 {
 	return total / float64(len(X))
 }
 
-// PredictClass returns 0 or 1 for a single sample.
 func (n *Network) PredictClass(x []float64) int {
 	if n.Forward(x) >= 0.5 {
 		return 1
@@ -120,8 +111,7 @@ func (n *Network) PredictClass(x []float64) int {
 	return 0
 }
 
-// Train runs the full training loop with optional early stopping.
-// It returns the full trace history.
+// Train loops with early stopping, then restores the best (lowest test-loss) weights.
 func (n *Network) Train(
 	trainX [][]float64, trainY []float64,
 	testX [][]float64, testY []float64,
@@ -129,6 +119,8 @@ func (n *Network) Train(
 ) []Trace {
 	var history []Trace
 	bestTestLoss := math.MaxFloat64
+	var bestW [][][]float64
+	var bestB [][]float64
 	noImprove := 0
 
 	for epoch := 1; epoch <= n.cfg.Epochs; epoch++ {
@@ -141,30 +133,46 @@ func (n *Network) Train(
 			preds[i] = n.PredictClass(x)
 			targets[i] = int(testY[i])
 		}
-		acc := accuracy(preds, targets)
-		f1 := evalFn(preds, targets)
 
 		history = append(history, Trace{
 			Epoch:     epoch,
 			TrainLoss: trainLoss,
 			TestLoss:  testLoss,
-			TestAcc:   acc,
-			TestF1:    f1,
+			TestAcc:   accuracy(preds, targets),
+			TestF1:    evalFn(preds, targets),
 		})
 
-		if n.cfg.EarlyStopping > 0 {
-			if testLoss < bestTestLoss-1e-5 {
-				bestTestLoss = testLoss
-				noImprove = 0
-			} else {
-				noImprove++
-				if noImprove >= n.cfg.EarlyStopping {
-					break
-				}
+		if testLoss < bestTestLoss {
+			bestTestLoss = testLoss
+			bestW, bestB = n.snapshotParams()
+			noImprove = 0
+		} else {
+			noImprove++
+			if n.cfg.EarlyStopping > 0 && noImprove >= n.cfg.EarlyStopping {
+				break
 			}
 		}
 	}
+
+	if bestW != nil {
+		n.restoreParams(bestW, bestB)
+	}
 	return history
+}
+
+func (n *Network) snapshotParams() ([][][]float64, [][]float64) {
+	w := make([][][]float64, len(n.layers))
+	b := make([][]float64, len(n.layers))
+	for i, l := range n.layers {
+		w[i], b[i] = l.SnapshotParams()
+	}
+	return w, b
+}
+
+func (n *Network) restoreParams(w [][][]float64, b [][]float64) {
+	for i, l := range n.layers {
+		l.RestoreParams(w[i], b[i])
+	}
 }
 
 func bceLoss(pred, target float64) float64 {

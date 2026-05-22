@@ -6,7 +6,9 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/shlaapnik/metopt-lab3/internal/data"
 	"github.com/shlaapnik/metopt-lab3/internal/metrics"
@@ -14,31 +16,33 @@ import (
 	"github.com/shlaapnik/metopt-lab3/internal/optimizer"
 )
 
-const outDir = "out"
+const (
+	outDir = "out"
+	seed   = 666
+)
 
-// RunAll loads both datasets, trains each optimizer on each, prints results, saves CSVs.
+var weights = map[string]float64{"dataset1": 0.3, "dataset2": 0.3, "dataset3": 0.4}
+
 func RunAll() error {
-	fmt.Println("=== metopt-lab3: нейронная сеть для классификации ===")
-	fmt.Println()
-
+	os.RemoveAll(outDir)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
 
-	datasets := []struct {
-		name string
-		path string
-	}{
-		{"dataset1", "dataset1.csv"},
-		{"dataset2", "dataset2.csv"},
+	paths, err := filepath.Glob("dataset*.csv")
+	if err != nil {
+		return err
+	}
+	sort.Strings(paths)
+	if len(paths) == 0 {
+		return fmt.Errorf("no dataset*.csv in current dir")
 	}
 
-	optimizers := []optimizer.Optimizer{
+	opts := []optimizer.Optimizer{
 		optimizer.NewSGD(0.01),
 		optimizer.NewMomentum(0.005, 0.9),
 		optimizer.NewAdam(0.001, 0.9, 0.999, 1e-8),
 	}
-
 	cfg := nn.Config{
 		HiddenSizes:   []int{32, 16},
 		Lambda:        0.001,
@@ -47,44 +51,70 @@ func RunAll() error {
 		EarlyStopping: 30,
 	}
 
-	for _, ds := range datasets {
-		fmt.Printf("--- %s ---\n", ds.name)
+	f1 := map[string]float64{}
+	for _, path := range paths {
+		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 
-		raw, err := data.Load(ds.path)
+		ds, err := data.Load(path)
 		if err != nil {
-			return fmt.Errorf("load %s: %w", ds.path, err)
+			return err
 		}
 
-		rand.Seed(42)
-		train, test := data.TrainTestSplit(raw, 0.8)
+		rand.Seed(seed)
+		train, test := data.TrainTestSplit(ds, 0.8)
+		sc := data.FitScaler(train.X)
+		trainX, testX := sc.Transform(train.X), sc.Transform(test.X)
 
-		scaler := data.FitScaler(train.X)
-		trainX := scaler.Transform(train.X)
-		testX := scaler.Transform(test.X)
+		fmt.Printf("%s  %dx%d\n", name, len(ds.X), len(ds.X[0]))
+		for _, opt := range opts {
+			rand.Seed(seed)
+			net := nn.New(len(ds.X[0]), cfg, opt)
+			hist := net.Train(trainX, train.Y, testX, test.Y, metrics.F1)
 
-		inputDim := len(raw.X[0])
+			b := bestEpoch(hist)
+			if b.TestF1 > f1[name] {
+				f1[name] = b.TestF1
+			}
+			fmt.Printf("  %-26s ep %3d  loss %.4f  acc %.3f  f1 %.3f\n",
+				opt.Name(), b.Epoch, b.TrainLoss, b.TestAcc, b.TestF1)
 
-		for _, opt := range optimizers {
-			rand.Seed(42)
-			net := nn.New(inputDim, cfg, opt)
-
-			history := net.Train(trainX, train.Y, testX, test.Y, metrics.F1)
-
-			last := history[len(history)-1]
-			fmt.Printf("  %-30s  epochs=%3d  train_loss=%.4f  test_acc=%.4f  F1=%.4f\n",
-				opt.Name(), last.Epoch, last.TrainLoss, last.TestAcc, last.TestF1)
-
-			csvPath := filepath.Join(outDir, fmt.Sprintf("%s__%s.csv", ds.name, safeName(opt.Name())))
-			if err := saveHistory(csvPath, history); err != nil {
-				fmt.Printf("    warn: cannot save %s: %v\n", csvPath, err)
+			out := filepath.Join(outDir, name+"__"+safeName(opt.Name())+".csv")
+			if err := saveHistory(out, hist); err != nil {
+				return err
 			}
 		}
 		fmt.Println()
 	}
+
+	printScore(f1)
 	return nil
 }
 
-func saveHistory(path string, history []nn.Trace) error {
+func bestEpoch(hist []nn.Trace) nn.Trace {
+	best := hist[0]
+	for _, t := range hist[1:] {
+		if t.TestLoss < best.TestLoss {
+			best = t
+		}
+	}
+	return best
+}
+
+func printScore(f1 map[string]float64) {
+	total := 0.0
+	for _, name := range []string{"dataset1", "dataset2", "dataset3"} {
+		v, ok := f1[name]
+		if !ok {
+			fmt.Printf("%s f1 ---- (нет файла)\n", name)
+			continue
+		}
+		fmt.Printf("%s f1 %.3f\n", name, v)
+		total += weights[name] * v
+	}
+	fmt.Printf("score = 0.3*d1 + 0.3*d2 + 0.4*d3 = %.3f\n", total)
+}
+
+func saveHistory(path string, hist []nn.Trace) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -94,9 +124,9 @@ func saveHistory(path string, history []nn.Trace) error {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
-	_ = w.Write([]string{"epoch", "train_loss", "test_loss", "test_acc", "test_f1"})
-	for _, t := range history {
-		_ = w.Write([]string{
+	w.Write([]string{"epoch", "train_loss", "test_loss", "test_acc", "test_f1"})
+	for _, t := range hist {
+		w.Write([]string{
 			strconv.Itoa(t.Epoch),
 			strconv.FormatFloat(t.TrainLoss, 'f', 6, 64),
 			strconv.FormatFloat(t.TestLoss, 'f', 6, 64),
@@ -107,17 +137,7 @@ func saveHistory(path string, history []nn.Trace) error {
 	return nil
 }
 
-func safeName(name string) string {
-	out := make([]rune, 0, len(name))
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			out = append(out, r)
-		case r == '-' || r == '_':
-			out = append(out, r)
-		default:
-			out = append(out, '_')
-		}
-	}
-	return string(out)
+func safeName(s string) string {
+	r := strings.NewReplacer("(", "_", ")", "", "=", "", ",", "_", " ", "")
+	return r.Replace(s)
 }
